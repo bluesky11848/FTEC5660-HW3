@@ -1,183 +1,205 @@
-# FTEC5660 Homework 3: Fisher's 15-Point Investment Agent
+# FTEC5660 Homework 3: Fisher Analysis Agent
 
-Build a LangChain agent that researches a company with tools and applies the
-framework from Philip Fisher's *Common Stocks and Uncommon Profits* (Part One,
-Chapter 3 "What to buy: the fifteen points to look for in a common stock", and
-Chapter 4 "What to buy: applying this to your own needs"). You choose 3 of
-Fisher's 15 points and decide yourself what PASS means for each. For every
-company your agent gives a PASS/FAIL verdict on your 3 points and a short
-summary.
+A LangChain workflow for Fisher points **1, 5 and 6**, using the required
+`deepseek-v4-flash` model and only the supplied company-data tools.
 
-The companies are fictional, so the model cannot answer from memory. Unlike a
-pile of reports, the evidence is spread over three sources, and your agent has
-to go and get it with tools, the way Fisher's "scuttlebutt" method sends an
-investor to talk to customers, competitors, suppliers and staff.
+## Run
 
-## Data and tools
-
-`public_test/` has one folder per company. Your code receives four tools per
-company (built by the provided code in `hw3.py`):
-
-| Tool | What it gives you |
-| --- | --- |
-| `list_documents()` | the company's six documents and their dates |
-| `read_document(name)` | one document: the 2025 letter to shareholders, four earnings calls (Q3 2025 to Q2 2026) and a news file (July 2025 to July 2026) |
-| `sql_query(query)` | one read-only SQLite query on the company's database; at most 50 rows come back, so use `SUM`, `GROUP BY` and `WHERE` |
-| `interview(role, topic)` | what one person says about the company; at most **10 interviews per company** |
-
-The documents are what management says. Management's own claims (such as "we
-have never cut research" or "our people are our greatest strength") are not
-evidence on their own: check them against the database and the interviews.
-
-**Database tables** (amounts in USD thousands; dates `YYYY-MM-DD`, months
-`YYYY-MM`, quarters like `2025Q3`; the fiscal year is the calendar year):
-
-| Table | Columns |
-| --- | --- |
-| `company` | name, industry |
-| `industry_medians` | industry, revenue_growth_2y_pct, new_product_share_pct, new_product_sales_per_rd, operating_margin_pct (one row per industry; use the row for the company's own industry) |
-| `orders` | order_id, order_date, product, customer, amount, note (about 3,000 to 4,000 orders from January 2023 to June 2026; revenue is the sum of order amounts) |
-| `products` | product, launch_date |
-| `monthly_costs` | month, cost_of_sales, selling_admin, research_development |
-| `quarterly_cash` | quarter, operating_cash_flow, capex, cash_end |
-| `capex_plan` | year, planned_capex (2026 to 2028) |
-| `returns` | month, units_shipped, units_returned |
-| `insider_trades` | trade_date, person, title, side (`buy` or `sell`), shares, price |
-
-**Terms used in the data.**
-
-| Term | Meaning |
-| --- | --- |
-| FY2025 | Fiscal year 2025. Here the fiscal year is the calendar year, so FY2025 is January to December 2025. |
-| Quarter | Three months of the year: Q1 is January to March, Q2 April to June, Q3 July to September and Q4 October to December. The database writes `2025Q3`; the documents write "third quarter 2025". |
-| Amounts | The database is in **USD thousands** (676,100 means US$676.1 million). The documents use USD millions. |
-| Revenue | Money from sales: the sum of `amount` in `orders`. |
-| Cost of sales | The cost of making the products that were sold. |
-| Selling and admin | The cost of selling and of running the company (sales staff, offices, management). |
-| R&D | Research and development spending, mainly on new products. |
-| Operating margin | Operating profit as a share of revenue: (revenue − cost of sales − selling and admin − R&D) ÷ revenue. |
-| Operating cash flow | Cash that the day-to-day business brings in during a quarter. |
-| Cash at the end of a quarter | The cash the company holds on the last day of that quarter (`cash_end`). |
-| Capex | Capital expenditure: spending on factories, machines and other long-term assets. `capex_plan` holds the planned capex for 2026 to 2028. |
-| Return rate | Units returned ÷ units shipped, from the `returns` table. |
-| Industry median | The middle value for companies in the same industry, from `industry_medians`. |
-| Insider | A director or senior manager of the company. `insider_trades` lists the shares they bought (`buy`) or sold (`sell`). |
-| Earnings call | A meeting each quarter where management presents the quarter's results to investors. Each call quotes that quarter's revenue. |
-
-**Interviews.** Roles: `customer`, `current_employee`, `former_employee`,
-`competitor`, `supplier`. Topics: `sales_team`, `working_conditions`,
-`top_management`, `decision_making`, `competitive_edge`. Only some people know
-about each topic; the others say they can't comment, and that answer still
-uses up one interview.
-
-| Topic | Who knows about it |
-| --- | --- |
-| `sales_team` | customer, competitor |
-| `working_conditions` | current_employee, former_employee |
-| `top_management` | former_employee, supplier |
-| `decision_making` | supplier, customer |
-| `competitive_edge` | competitor, customer |
-
-People who know about a topic always agree with each other, so one good answer
-is enough.
-
-## Choose your 3 points and your rules
-
-Pick any 3 of Fisher's 15 points and write them in `CHOSEN_POINTS` near the
-top of `hw3.py`, e.g. `CHOSEN_POINTS = [1, 7, 15]`. The full questions are in
-`FISHER_POINTS` in `hw3.py` and in the book.
-
-| # | Fisher's point | Where the evidence is |
-| --- | --- | --- |
-| 1 | Market potential for sales growth | database |
-| 2 | New products as current lines mature | database |
-| 3 | Effective research and development | database |
-| 4 | Above-average sales organization | interviews (`sales_team`) |
-| 5 | Worthwhile profit margin | database |
-| 6 | Maintaining or improving margins | database |
-| 7 | Labour and personnel relations | interviews (`working_conditions`) |
-| 8 | Executive relations | interviews (`top_management`) |
-| 9 | Depth of management | interviews (`decision_making`) |
-| 10 | Cost analysis and accounting controls | earnings calls, checked against the database |
-| 11 | Advantage over competitors | interviews (`competitive_edge`) |
-| 12 | Long-range outlook on profits | database |
-| 13 | Growth without dilutive equity financing | database |
-| 14 | Management talks freely about troubles | earnings calls, checked against the database |
-| 15 | Management of unquestionable integrity | news file, checked against the database |
-
-For each of your points, **you design the rule**: which evidence to use, what
-to compute or whom to ask, and where the line between PASS and FAIL lies. PASS
-means the company looks favourable on that point, as Fisher would see it.
-
-We grade your verdicts against our own answer key. It uses one fixed rule per
-point, which we do not publish, and the data never puts a company close to
-the line of that rule, so a sensible reading of Fisher usually gives the same
-answer. **Test your rules on the public answers**:
-`public_test/ground_truth.json` gives the expected verdict on all 15 points
-for each of the 20 public companies, and every point fails in 6 of them. If
-your rule disagrees with the public answers, rethink it.
-
-**Tip: calculate with tools, not in your head.** Do every sum, ratio and
-comparison in SQL or Python, including the number of days between two dates
-(SQLite's `julianday()` gives a date as a number of days).
-
-## Student task
-
-Fill in the three places in `hw3.py` marked `### YOUR CODE HERE`. You may add
-imports, constants and helper functions above them, but do not change the
-provided code below them:
-
-- `CHOSEN_POINTS` lists your 3 points.
-- `build_agent()` creates your model and anything else you need once.
-- `analyze_companies(agent, companies)` receives
-  `{company_folder: [list_documents, read_document, sql_query, interview]}`
-  and returns, for every company,
-  `{"points": {1: "PASS", 7: "FAIL", 15: "PASS"}, "summary": "..."}` (here with
-  `CHOSEN_POINTS = [1, 7, 15]`).
-
-Use the course techniques that fit your points: tool use for the database and
-the interviews, planning which interviews to spend, routing each point to the
-right source, prompt chaining, parallel calls, reflection to check your
-answers, or a combination. Your code must read company data **only through
-the four tools**; do not open `company.db` or `interviews.dat` yourself. Do
-not hard-code folder names, company names or the public answers.
-
-## Setup and public test
+Use Python 3.10 or newer (validated with Python 3.12).
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-echo "DEEPSEEK_API_KEY=your_key_here" > .env
+```
+
+Create a local `.env` file containing `DEEPSEEK_API_KEY=your_key_here`, then run:
+
+```bash
 python3 hw3.py --data-folder public_test
 ```
 
-Use your own DeepSeek API key (from https://platform.deepseek.com). The
-required model is `deepseek-v4-flash`. We grade with our own key, so never put
-a key in your code; `.env` must stay out of git.
+The unchanged runner writes `results.csv`. Keep `.env` private and out of Git.
+If no key is present, the program explicitly reports **SQL-only fallback**;
+that mode checks the numerical rules but does not constitute a live model test.
+The grader can provide its own key through the environment or `.env`.
 
-The program creates `results.csv` with the columns `company`, `points`,
-`points_correct`, `point_errors`, `interviews_used` and `summary`, and prints
-the point score on your 3 points (the percentage after "balanced"). The point
-score is the average of two shares: the share of truly passing verdicts that
-you marked PASS and the share of truly failing verdicts that you marked FAIL.
-For example, 90% and 60% give (90% + 60%) / 2 = 75%, and marking every point
-PASS gives (100% + 0%) / 2 = 50%. Once `CHOSEN_POINTS` is set, the starter
-runs before you add any API code (it returns no verdicts, so it scores 0%).
+Run the isolated regression checks without API calls:
 
-`public_test/ground_truth.json` gives the expected verdicts on all 15 points
-for each public company. Grading uses a private set of about 20 unseen
-companies with the same tools and the same answer key rules, but different
-names and wording, and scores your 3 points only.
+```bash
+python3 -m unittest -v test_agent
+```
 
-## Homework 3 solution:
-> to students: this is your report, see the homework description.
+## Homework 3 solution
 
-### My 3 points and rules
-> for each point: why you chose it, your PASS rule in one or two sentences, and the evidence it uses. Quote Fisher where it helps.
+### My three points and rules
+
+The Fisher questions below are paraphrased from the point definitions reproduced
+in the supplied `hw3.py`, attributed there to *Common Stocks and Uncommon
+Profits*, Part One, Chapter 3. The thresholds are my operational rules for this
+assignment, not numerical thresholds prescribed by Fisher.
+
+| Point | Why I chose it | PASS rule | Evidence |
+| --- | --- | --- | --- |
+| **1: Market potential for sales growth** | Growth relative to the industry helps distinguish company performance from a generally expanding market. | PASS when cumulative revenue growth from FY2023 to FY2025 is at least the company's own industry's two-year revenue-growth median. | `orders`, `company`, `industry_medians.revenue_growth_2y_pct` |
+| **5: Worthwhile profit margin** | Revenue growth is less attractive when little of it becomes operating profit; industry comparison avoids treating different sectors as identical. | PASS when FY2025 operating margin is at least the company's own industry's operating-margin median. | `orders`, `monthly_costs`, `company`, `industry_medians.operating_margin_pct` |
+| **6: Maintaining or improving margins** | The direction of profitability adds information that its current level cannot provide. | PASS when FY2025 operating margin is at least FY2023 operating margin; equality counts as maintenance. | `orders`, `monthly_costs` for FY2023 and FY2025 |
+
+For year *y*, the calculations are:
+
+```text
+Revenue_y = SUM(orders.amount in year y)
+Operating_costs_y = SUM(cost_of_sales + selling_admin + research_development)
+Operating_margin_y_pct = 100 * (Revenue_y - Operating_costs_y) / Revenue_y
+Two_year_growth_pct = 100 * (Revenue_2025 / Revenue_2023 - 1)
+Margin_change_pp = Operating_margin_2025_pct - Operating_margin_2023_pct
+```
+
+The database uses USD thousands; all numerator and denominator amounts use the
+same units, so the ratios need no currency conversion. The margin change is in
+**percentage points**, whereas revenue growth is a percentage. I use complete
+calendar fiscal years and do not compare partial FY2026 revenue against a full
+year. Orders and costs are aggregated separately before joining, preventing a
+many-to-many join from multiplying the totals. The industry join uses the
+company's actual industry, not an average of unrelated industries.
 
 ### Design
-> a visualization of your agent design and one paragraph describing it.
 
-### Results
-> your point score on `public_test`, the companies where your verdicts disagree with the public answers, and why.
+```mermaid
+flowchart TD
+    A["build_agent: initialize shared LangChain chain"] --> B["For each company: maximum four concurrent workflows"]
+    B --> C["Plan and route points 1, 5, 6 to sql_query"]
+    C --> D["One aggregate SELECT: revenues, costs, industry medians"]
+    D --> E["SQL computes ratios and PASS flags before display rounding"]
+    E --> F["Python validates evidence and builds numerical summary"]
+    F --> G["DeepSeek v4 flash: audit the three rules and interpret results"]
+    G --> H{"Valid JSON and matching verdicts?"}
+    H -->|Yes| I["Return three verdicts and grounded summary"]
+    H -->|No| J["One repair call with original evidence"]
+    J --> K{"Valid repair?"}
+    K -->|Yes| I
+    K -->|No| L["Keep SQL verdicts; label model fallback"]
+    F -->|No API key| L
+    D -->|Missing or invalid evidence| M["Return explicit error entry; continue other companies"]
+    I --> N["Unchanged runner writes results.csv and scores results"]
+    L --> N
+    M --> N
+```
+
+This is a planned, tool-using LangChain workflow. Because all selected points use
+structured financial evidence, the plan routes them to `sql_query` and makes
+exactly one aggregate query per company. Interviews and management documents
+are unnecessary for these rules, so the agent uses zero interviews and does not
+rely on management claims. A shared `ChatPromptTemplate -> ChatDeepSeek ->
+JsonOutputParser` chain audits the evidence and writes a concise interpretation.
+The prompt asks the model to reflect on the distinction between margin level and
+trend. Python then checks the model's verdicts against SQL and rejects invalid
+JSON, inconsistent verdicts, or numerical claims in the interpretation. One
+repair call is allowed. All numeric statements in the final summary are rendered
+from tool evidence; the model adds the qualitative interpretation. Company
+workflows run concurrently with a limit of four.
+
+The SQL returns integer comparison flags because the provided tool rounds
+floating-point values to two decimals. Comparing rounded numbers in Python or
+in the model could otherwise change a borderline decision. Revenue denominators,
+finite values and the presence of twelve months in both evaluation years are
+validated before issuing verdicts. This completeness check is tailored to the
+assignment dataset; a business with legitimate zero-sales months would need a
+more explicit missing-data policy.
+
+### Reliability and constraints
+
+- The only model is `deepseek-v4-flash`; company evidence comes only from the supplied `sql_query` LangChain tool.
+- No company names, folder names or public verdicts are embedded in the agent. The unchanged runner reads the answer key only after analysis for scoring.
+- The original tools, runner and scoring code below the marked boundary are unchanged.
+- A failed model call retains evidence-derived verdicts and labels the summary as a fallback. Failed evidence produces an explicit company error and missing verdicts rather than invented answers.
+- API requests have a 40-second SDK timeout and one SDK retry. Each chain invocation has a 60-second outer timeout, with at most two invocations per company. The SQL call has a 20-second timeout. For twenty companies in five batches of four, these bounds are comfortably below the thirty-minute grading limit under normal cancellation behavior.
+- The model interpretation still requires semantic review: matching verdicts and valid JSON do not prove that every sentence is justified.
+
+### Public-test results
+
+A live run using the configured DeepSeek key processed all **20 companies**:
+
+| Measure | Observed result |
+| --- | --- |
+| Correct verdicts | **60 / 60** |
+| True-PASS verdicts correctly identified | **42 / 42 = 100%** |
+| True-FAIL verdicts correctly identified | **18 / 18 = 100%** |
+| Balanced point accuracy | **100.0%** |
+| Companies with disagreements | **None** |
+| Companies using model fallback | **0 / 20** |
+| Interviews used | **0** |
+
+The balanced score is `(42/42 + 18/18) / 2 = 100%`. The saved live output is
+[validation/public_test_results.csv](validation/public_test_results.csv).
+An earlier SQL-only run also scored 60/60; the reported live run additionally
+verified that the actual required model completed its audit for every company.
+
+| Company | Point 1 | Point 5 | Point 6 | Correct |
+| --- | --- | --- | --- | --- |
+| ashgrove_labs | PASS | PASS | FAIL | 3/3 |
+| aurel_systems | PASS | PASS | PASS | 3/3 |
+| bramble_labs | PASS | PASS | PASS | 3/3 |
+| cobalt_holdings | FAIL | PASS | FAIL | 3/3 |
+| copperfield_technologies | PASS | PASS | PASS | 3/3 |
+| driftwood_systems | FAIL | PASS | PASS | 3/3 |
+| dunmore_holdings | PASS | PASS | PASS | 3/3 |
+| elmstead_technologies | PASS | PASS | PASS | 3/3 |
+| emberly_systems | PASS | PASS | FAIL | 3/3 |
+| everline_dynamics | PASS | FAIL | PASS | 3/3 |
+| falcrest_technologies | PASS | FAIL | PASS | 3/3 |
+| fernhill_group | PASS | PASS | PASS | 3/3 |
+| granite_group | PASS | PASS | FAIL | 3/3 |
+| halcyon_works | FAIL | FAIL | PASS | 3/3 |
+| hollins_group | PASS | PASS | PASS | 3/3 |
+| ironbark_technologies | FAIL | FAIL | PASS | 3/3 |
+| juniper_industries | FAIL | PASS | PASS | 3/3 |
+| kestrel_technologies | FAIL | PASS | PASS | 3/3 |
+| lindale_holdings | PASS | FAIL | FAIL | 3/3 |
+| northwind_group | PASS | FAIL | FAIL | 3/3 |
+
+There were no public-answer disagreements to diagnose. The examples also show
+why the points should be judged separately: Ashgrove Labs passed growth and
+margin level but failed margin trend, while Everline Dynamics passed growth
+and margin trend but failed margin level. These names are examples from the
+saved results, not inputs to the agent's rules.
+
+A second live run from a clean clone of the starter with the solution applied
+also scored **60/60**, with **zero model fallbacks**, in **14.37 seconds**.
+The clean checkout had no `.env`; the key was supplied through the process
+environment. It used the same installed dependency environment. See
+[validation/clean_run.txt](validation/clean_run.txt) and
+[validation/clean_public_test_results.csv](validation/clean_public_test_results.csv).
+
+Nine offline regression tests passed. They cover malformed evidence,
+full-precision comparison flags despite rounded displays, per-company failure
+isolation, correction of conflicting model verdicts, API-failure fallback,
+rejection of invalid model output, the real LangChain prompt/parser with a
+mocked model, tool-name routing, and transparent handling of a missing key.
+These mocked tests supplement the live API run; they do not replace it.
+
+### Limitations
+
+The public set validates agreement with the assignment labels, not investment
+performance or a guaranteed private-test score. Historical revenue growth is a
+proxy for market potential and does not establish that growth will continue.
+Comparing margin endpoints captures the net change but can miss intervening
+volatility and does not explain which management actions caused it. Broader
+investment research would require additional evidence and separate rules.
+The thresholds were checked against the public examples, so those examples
+should not be described as an independent out-of-sample evaluation.
+
+### References and preparation
+
+- Philip A. Fisher, *Common Stocks and Uncommon Profits*, Part One, Chapters 3-4; selected point definitions are reproduced in the supplied starter code.
+- [Course starter repository](https://github.com/BINH2702/FTEC5660-HW3): data schema, allowed tools and evaluation protocol.
+- [LangChain ChatDeepSeek integration](https://docs.langchain.com/oss/python/integrations/chat/deepseek): model initialization and async integration. Documentation was consulted for implementation, not as company evidence.
+
+This submission was prepared with AI assistance. The implementation and reported
+results were validated with the tests described above.
+
+## Task 2: Reflection
+
+See [REFLECTION.md](REFLECTION.md) for the reflection on AI sycophancy and
+AI-psychosis, including their relationship to evidence, uncertainty and the
+design of an investment-analysis agent.

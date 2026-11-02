@@ -1,0 +1,6 @@
+Clean-checkout live API run
+Python: 3.12.14
+Model: deepseek-v4-flash
+Elapsed seconds: 14.37
+Exit code: 0
+Processed 20 companies. Wrote results.csv. Your points: 1, 5, 6. Point accuracy: 60/60 (balanced: 100.0%).

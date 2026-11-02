@@ -1,0 +1,16 @@
+test_api_failure_preserves_tool_verdicts_without_leaking_error (test_agent.AgentTests.test_api_failure_preserves_tool_verdicts_without_leaking_error) ... ok
+test_bad_company_does_not_crash_good_company (test_agent.AgentTests.test_bad_company_does_not_crash_good_company) ... ok
+test_full_precision_flags_override_display_rounding (test_agent.AgentTests.test_full_precision_flags_override_display_rounding) ... ok
+test_invalid_evidence_is_rejected (test_agent.AgentTests.test_invalid_evidence_is_rejected) ... ok
+test_invalid_model_output_is_not_published (test_agent.AgentTests.test_invalid_model_output_is_not_published) ... ok
+test_model_verdict_conflict_gets_one_repair (test_agent.AgentTests.test_model_verdict_conflict_gets_one_repair) ... ok
+test_no_api_key_is_explicitly_reported (test_agent.AgentTests.test_no_api_key_is_explicitly_reported) ... No DEEPSEEK_API_KEY: running SQL rules only; model audit NOT run.
+Executing <Task pending name='Task-37' coro=<AgentTests.test_no_api_key_is_explicitly_reported() running at /Users/sky/Documents/Codex/2026-11-02/ban/work/clean-test/test_agent.py:139> wait_for=<_GatheringFuture pending cb=[Task.task_wakeup()] created at /Users/sky/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/asyncio/tasks.py:712> cb=[_run_until_complete_cb() at /Users/sky/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/asyncio/base_events.py:181] created at /Users/sky/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/asyncio/runners.py:100> took 0.295 seconds
+ok
+test_real_langchain_prompt_and_json_parser_with_mock_model (test_agent.AgentTests.test_real_langchain_prompt_and_json_parser_with_mock_model) ... ok
+test_tool_selection_is_by_name (test_agent.AgentTests.test_tool_selection_is_by_name) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.312s
+
+OK

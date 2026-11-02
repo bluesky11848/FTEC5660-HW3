@@ -55,62 +55,215 @@ def load_env_file(path: Path = Path(".env")) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
-# Choose any 3 of the 15 points, e.g. CHOSEN_POINTS = [1, 7, 15]. Your agent
-# gives a PASS or FAIL verdict on these 3 points only, with your own rule for each.
-CHOSEN_POINTS: list[int] = []  ### YOUR CODE HERE
+# The evidence plan is fixed by the selected Fisher points. All company data
+# enters through the provided LangChain sql_query tool, never through file I/O.
+CHOSEN_POINTS: list[int] = [1, 5, 6]
+
+EVIDENCE_SQL = """
+SELECT
+    a.r23 AS revenue_2023, a.r25 AS revenue_2025,
+    b.c23 AS costs_2023, b.c25 AS costs_2025,
+    100.0 * (a.r25 / a.r23 - 1.0) AS growth_pct,
+    m.revenue_growth_2y_pct AS industry_growth_pct,
+    100.0 * (a.r23 - b.c23) / a.r23 AS margin_2023_pct,
+    100.0 * (a.r25 - b.c25) / a.r25 AS margin_2025_pct,
+    m.operating_margin_pct AS industry_margin_pct,
+    100.0 * ((a.r25 - b.c25) / a.r25
+           - (a.r23 - b.c23) / a.r23) AS margin_change_pp,
+    CASE WHEN 100.0 * (a.r25 / a.r23 - 1.0)
+                   >= m.revenue_growth_2y_pct THEN 1 ELSE 0 END AS pass_1,
+    CASE WHEN 100.0 * (a.r25 - b.c25) / a.r25
+                   >= m.operating_margin_pct THEN 1 ELSE 0 END AS pass_5,
+    CASE WHEN (a.r25 - b.c25) / a.r25
+                   >= (a.r23 - b.c23) / a.r23 THEN 1 ELSE 0 END AS pass_6,
+    a.months23 AS sales_months_2023, a.months25 AS sales_months_2025,
+    b.months23 AS cost_months_2023, b.months25 AS cost_months_2025
+FROM (
+    SELECT
+        1.0 * SUM(CASE WHEN substr(order_date, 1, 4) = '2023'
+                      THEN amount ELSE 0 END) AS r23,
+        1.0 * SUM(CASE WHEN substr(order_date, 1, 4) = '2025'
+                      THEN amount ELSE 0 END) AS r25,
+        COUNT(DISTINCT CASE WHEN substr(order_date, 1, 4) = '2023'
+                            THEN substr(order_date, 1, 7) END) AS months23,
+        COUNT(DISTINCT CASE WHEN substr(order_date, 1, 4) = '2025'
+                            THEN substr(order_date, 1, 7) END) AS months25
+    FROM orders
+    WHERE order_date >= '2023-01-01' AND order_date < '2026-01-01'
+) a
+CROSS JOIN (
+    SELECT
+        SUM(CASE WHEN substr(month, 1, 4) = '2023'
+                 THEN cost_of_sales + selling_admin + research_development
+                 ELSE 0 END) AS c23,
+        SUM(CASE WHEN substr(month, 1, 4) = '2025'
+                 THEN cost_of_sales + selling_admin + research_development
+                 ELSE 0 END) AS c25,
+        COUNT(DISTINCT CASE WHEN substr(month, 1, 4) = '2023'
+                            THEN month END) AS months23,
+        COUNT(DISTINCT CASE WHEN substr(month, 1, 4) = '2025'
+                            THEN month END) AS months25
+    FROM monthly_costs
+    WHERE month >= '2023-01' AND month < '2026-01'
+) b
+CROSS JOIN company co
+JOIN industry_medians m ON m.industry = co.industry
+"""
+
+AUDIT_PROMPT = """You are an evidence-grounded Fisher analysis agent.
+Use only the supplied SQL evidence; no memory, web research or invented facts.
+All arithmetic and comparisons have already been performed in SQLite before
+display rounding. The integer pass_1/pass_5/pass_6 flags are authoritative.
+Apply these rules to the complete fiscal years, not partial-year 2026:
+1: PASS if FY2023-to-FY2025 cumulative revenue growth is at least the company's
+own industry median two-year growth. Historical growth is only a proxy for
+future market potential, not a forecast or proof of sustained future demand.
+5: PASS if FY2025 operating margin is at least the own-industry median margin.
+Operating costs include cost of sales, selling/admin AND research/development.
+6: PASS if FY2025 operating margin is at least FY2023 operating margin.
+A company may pass point 5 and fail point 6, or vice versa: level and trend differ.
+Reflect before answering: check all three points separately, verify direction
+of each comparison, and avoid interpreting displayed rounding as exact data.
+Return only JSON with this shape:
+{{"points": {{"1": "PASS or FAIL", "5": "PASS or FAIL", "6": "PASS or FAIL"}},
+  "interpretation": "One concise sentence interpreting the pattern of verdicts."}}
+The interpretation must contain no numbers, no invented causes, no investment
+recommendation, and no claims about management motives or future performance.
+"""
+
+
+def parse_evidence(raw: str) -> dict[str, float]:
+    """Validate the tool's one-row table; never treat a tool error as evidence."""
+    import math
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if len(lines) != 2 or lines[0].startswith("SQL error:"):
+        raise ValueError("Expected exactly one aggregated SQL evidence row")
+    keys = [s.strip() for s in lines[0].split("|")]
+    values = [s.strip() for s in lines[1].split("|")]
+    if len(keys) != len(values) or len(set(keys)) != len(keys):
+        raise ValueError("Malformed SQL evidence columns")
+    result = dict(zip(keys, map(float, values)))
+    required = {
+        "revenue_2023", "revenue_2025", "costs_2023", "costs_2025",
+        "growth_pct", "industry_growth_pct", "margin_2023_pct",
+        "margin_2025_pct", "industry_margin_pct", "margin_change_pp",
+        "pass_1", "pass_5", "pass_6", "sales_months_2023",
+        "sales_months_2025", "cost_months_2023", "cost_months_2025",
+    }
+    if not required.issubset(result) or not all(map(math.isfinite, result.values())):
+        raise ValueError("Missing or non-finite SQL evidence")
+    if result["revenue_2023"] <= 0 or result["revenue_2025"] <= 0:
+        raise ValueError("Revenue denominator must be positive")
+    if any(result[k] != 12 for k in required if "months" in k):
+        raise ValueError("Expected twelve months of sales and costs in each fiscal year")
+    if any(result[f"pass_{p}"] not in (0, 1) for p in CHOSEN_POINTS):
+        raise ValueError("Invalid SQL comparison flag")
+    return result
+
+
+def evidence_summary(e: dict[str, float], points: dict[int, str]) -> str:
+    """Keep the numerical explanation faithful even if the model is unavailable."""
+    return (
+        f"P1 {points[1]}: FY2023-FY2025 revenue growth {e['growth_pct']:.2f}% "
+        f"versus industry {e['industry_growth_pct']:.2f}%. "
+        f"P5 {points[5]}: FY2025 operating margin {e['margin_2025_pct']:.2f}% "
+        f"versus industry {e['industry_margin_pct']:.2f}%. "
+        f"P6 {points[6]}: operating margin changed from "
+        f"{e['margin_2023_pct']:.2f}% to {e['margin_2025_pct']:.2f}% "
+        f"({e['margin_change_pp']:+.2f} percentage points)."
+    )
+
+
+def validate_audit(value: Any, points: dict[int, str]) -> str:
+    """A model's interpretation is accepted only alongside matching verdicts."""
+    if not isinstance(value, dict):
+        raise ValueError("Model response is not an object")
+    if value.get("points") != {str(p): v for p, v in points.items()}:
+        raise ValueError("Model verdicts disagree with the SQL rules")
+    interpretation = value.get("interpretation")
+    if not isinstance(interpretation, str) or not interpretation.strip():
+        raise ValueError("Missing model interpretation")
+    if len(interpretation) > 500 or any(c.isdigit() for c in interpretation):
+        raise ValueError("Interpretation must be brief and contain no numbers")
+    return " ".join(interpretation.split())
 
 
 def build_agent() -> Any:
-    """Create and return your model or agent once.
+    """Create one LangChain model chain, shared across company workflows."""
+    import os
+    import sys
+    from langchain_core.output_parsers import JsonOutputParser
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_deepseek import ChatDeepSeek
 
-    Suggested imports:
-        from langchain_deepseek import ChatDeepSeek
-        from langchain.agents import create_agent
-
-    Use the DeepSeek model named by ``MODEL_NAME``. The API key is loaded
-    from .env. Each company has its own tools (see ``analyze_companies``), so
-    you will probably create one tool-calling agent per company there.
-    """
-    ### YOUR CODE HERE
-    return None
+    if not os.environ.get("DEEPSEEK_API_KEY", "").strip():
+        print("No DEEPSEEK_API_KEY: running SQL rules only; model audit NOT run.",
+              file=sys.stderr)
+        return {"chain": None, "status": "no API key; model audit not run"}
+    try:
+        model = ChatDeepSeek(
+            model=MODEL_NAME, temperature=0, max_tokens=1000,
+            timeout=40, max_retries=1,
+        )
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", AUDIT_PROMPT),
+            ("human", "SQL evidence:\n{evidence}\n{feedback}"),
+        ])
+        return {"chain": prompt | model | JsonOutputParser(), "status": "ready"}
+    except Exception as exc:
+        # Do not print exception bodies: provider errors can contain credentials.
+        return {"chain": None, "status": f"model setup failed ({type(exc).__name__})"}
 
 
 async def analyze_companies(agent: Any, companies: dict[str, list[Any]]) -> dict[str, dict[str, Any]]:
-    """Run your agent and return its verdicts on CHOSEN_POINTS for every company.
+    """Route evidence, apply rules, audit with the LLM, validate, and summarize."""
+    semaphore = asyncio.Semaphore(4)
 
-    ``companies`` maps each company folder name to its four LangChain tools:
+    async def analyze_one(name: str, tools: list[Any]) -> tuple[str, dict[str, Any]]:
+        async with semaphore:
+            try:
+                # Selecting by tool name avoids coupling to a reordered tool list.
+                sql = next(t for t in tools if t.name == "sql_query")
+                raw = await asyncio.wait_for(sql.ainvoke({"query": EVIDENCE_SQL}), 20)
+                evidence = parse_evidence(raw)
+                points = {p: "PASS" if evidence[f"pass_{p}"] else "FAIL"
+                          for p in CHOSEN_POINTS}
+                summary = evidence_summary(evidence, points)
+            except Exception as exc:
+                # Missing evidence is not fabricated into a PASS or FAIL.
+                return name, {"points": {}, "summary":
+                              f"Evidence unavailable ({type(exc).__name__}); no verdicts issued."}
 
-        list_documents()             names and dates of the company's documents
-        read_document(name)          the text of one document
-        sql_query(query)             one read-only SQLite query on company.db
-        interview(role, topic)       one interview answer (INTERVIEW_LIMIT per company)
+            chain = agent["chain"]
+            if chain is None:
+                return name, {"points": points, "summary": summary +
+                              f" [SQL-only fallback: {agent['status']}]."}
 
-    Give the tools to a tool-calling agent, e.g.
-    ``create_agent(model, tools=companies[name], system_prompt=...)``, or call
-    them yourself with ``tool.invoke({...})``. The README explains the
-    documents, the database tables and the interview roles and topics.
+            feedback = ""
+            failure = "unknown error"
+            for attempt in range(2):
+                try:
+                    response = await asyncio.wait_for(
+                        chain.ainvoke({"evidence": raw, "feedback": feedback}),
+                        timeout=60,
+                    )
+                    interpretation = validate_audit(response, points)
+                    return name, {"points": points,
+                                  "summary": summary + " " + interpretation}
+                except Exception as exc:
+                    failure = type(exc).__name__
+                    # One bounded repair call, using the original evidence again.
+                    feedback = (
+                        "The prior response failed validation or the API failed. "
+                        "Return valid JSON, match the SQL pass flags exactly, "
+                        "and provide one short interpretation without numbers."
+                    )
+            return name, {"points": points, "summary": summary +
+                          f" [SQL-only fallback: model audit failed ({failure})]."}
 
-    Return one dictionary per company folder name, e.g. with
-    CHOSEN_POINTS = [1, 7, 15]:
-
-        {
-            "hollins_group": {
-                "points": {1: "PASS", 7: "FAIL", 15: "PASS"},
-                "summary": "Two or three sentences explaining the verdicts.",
-            },
-            ...
-        }
-
-    Each chosen point needs a verdict ("PASS" or "FAIL"; True/False also
-    works). Other points are ignored.
-
-    Catch errors per company (e.g. a failed API call) and still return an
-    entry for it: an exception here means no results.csv, which scores zero.
-    You may analyse companies in parallel (e.g. ``asyncio.gather``).
-    """
-    ### YOUR CODE HERE
-    _ = agent
-    return {name: {"points": {}, "summary": ""} for name in companies}
+    results = await asyncio.gather(*(analyze_one(n, ts) for n, ts in companies.items()))
+    return dict(results)
 
 
 # Everything below is provided runner/scoring code. No edits are needed.
